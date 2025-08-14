@@ -1,4 +1,4 @@
-Const Fastify = require("fastify");
+const Fastify = require("fastify");
 const cors = require("@fastify/cors");
 const WebSocket = require("ws");
 const fs = require("fs");
@@ -66,46 +66,37 @@ function getTX(d1, d2, d3) {
   return d1 + d2 + d3 >= 11 ? "T" : "X";
 }
 
-// ================== THUẬT TOÁN DỰ ĐOÁN ==================
 function predictNext(history) {
-    // Nếu không có đủ lịch sử (dưới 4 phiên), dự đoán dựa vào kết quả cuối cùng.
-    if (history.length < 4) {
-        const lastResult = history.at(-1)?.result;
-        return lastResult === "Tài" ? "Xỉu" : "Tài";
-    }
+  if (history.length < 4) return history.at(-1) || "Tài";
+  const last = history.at(-1);
 
-    const recentResults = history.slice(0, 4).map(r => r.result);
-    const last = recentResults[0];
+  if (history.slice(-4).every(k => k === last)) return last;
+  if (history.length >= 4 &&
+    history.at(-1) === history.at(-2) &&
+    history.at(-3) === history.at(-4) &&
+    history.at(-1) !== history.at(-3)) {
+    return last === "Tài" ? "Xỉu" : "Tài";
+  }
 
-    // Cầu 4-4 (ví dụ: T-T-T-T)
-    if (recentResults.every(k => k === last)) {
-        return last === "Tài" ? "Xỉu" : "Tài";
-    }
+  const last4 = history.slice(-4);
+  if (last4[0] !== last4[1] && last4[1] === last4[2] && last4[2] !== last4[3]) {
+    return last === "Tài" ? "Xỉu" : "Tài";
+  }
 
-    // Cầu 2-2 (ví dụ: T-T-X-X)
-    if (recentResults[0] === recentResults[1] &&
-        recentResults[2] === recentResults[3] &&
-        recentResults[0] !== recentResults[2]) {
-        return recentResults[0];
-    }
+  const pattern = history.slice(-6, -3).toString();
+  const latest = history.slice(-3).toString();
+  if (pattern === latest) return history.at(-1);
 
-    // Cầu 1-1 (ví dụ: T-X-T-X)
-    if (recentResults[0] !== recentResults[1] &&
-        recentResults[1] !== recentResults[2] &&
-        recentResults[2] !== recentResults[3] &&
-        recentResults[0] === recentResults[2]) {
-        return recentResults[0];
-    }
+  if (new Set(history.slice(-3)).size === 3) {
+    return Math.random() < 0.5 ? "Tài" : "Xỉu";
+  }
 
-    // Nếu không có mẫu rõ ràng, tìm kết quả phổ biến nhất trong 6 phiên gần nhất và dự đoán ngược lại
-    const last6 = history.slice(0, 6).map(r => r.result);
-    const taiCount = last6.filter(r => r === 'Tài').length;
-    const xiuCount = last6.filter(r => r === 'Xỉu').length;
-    
-    return taiCount > xiuCount ? "Xỉu" : "Tài";
+  const count = history.reduce((acc, val) => {
+    acc[val] = (acc[val] || 0) + 1;
+    return acc;
+  }, {});
+  return (count["Tài"] || 0) > (count["Xỉu"] || 0) ? "Xỉu" : "Tài";
 }
-
-// ================== PHẦN KẾT NỐI WEBSOCKET ==================
 
 function sendRikCmd1005() {
   if (rikWS?.readyState === WebSocket.OPEN) {
@@ -151,27 +142,15 @@ function connectRikWebSocket() {
         const res = json[3].res;
         if (!rikCurrentSession || res.sid > rikCurrentSession) {
           rikCurrentSession = res.sid;
-          rikResults.unshift({ 
-            sid: res.sid, 
-            d1: res.d1, 
-            d2: res.d2, 
-            d3: res.d3, 
-            result: getTX(res.d1, res.d2, res.d3) === "T" ? "Tài" : "Xỉu", 
-            timestamp: Date.now() 
-          });
+          rikResults.unshift({ sid: res.sid, d1: res.d1, d2: res.d2, d3: res.d3, timestamp: Date.now() });
           if (rikResults.length > 100) rikResults.pop();
           saveHistory();
-          console.log(`📥 Phiên mới ${res.sid} → ${rikResults[0].result}`);
+          console.log(`📥 Phiên mới ${res.sid} → ${getTX(res.d1, res.d2, res.d3)}`);
           setTimeout(() => { rikWS?.close(); connectRikWebSocket(); }, 1000);
         }
       } else if (Array.isArray(json) && json[1]?.htr) {
         rikResults = json[1].htr.map(i => ({
-          sid: i.sid, 
-          d1: i.d1, 
-          d2: i.d2, 
-          d3: i.d3, 
-          result: getTX(i.d1, i.d2, i.d3) === "T" ? "Tài" : "Xỉu",
-          timestamp: Date.now()
+          sid: i.sid, d1: i.d1, d2: i.d2, d3: i.d3, timestamp: Date.now()
         })).sort((a, b) => b.sid - a.sid).slice(0, 100);
         saveHistory();
         console.log("📦 Đã tải lịch sử các phiên gần nhất.");
@@ -196,8 +175,6 @@ loadHistory();
 connectRikWebSocket();
 fastify.register(cors);
 
-// ================== PHẦN API ==================
-
 fastify.get("/api/ditmemaysun", async () => {
   const valid = rikResults.filter(r => r.d1 && r.d2 && r.d3);
   if (!valid.length) return { message: "Không có dữ liệu." };
@@ -205,7 +182,6 @@ fastify.get("/api/ditmemaysun", async () => {
   const current = valid[0];
   const sum = current.d1 + current.d2 + current.d3;
   const ket_qua = sum >= 11 ? "Tài" : "Xỉu";
-  const du_doan = predictNext(valid);
 
   return {
     Phien: current.sid,
@@ -214,7 +190,6 @@ fastify.get("/api/ditmemaysun", async () => {
     Xuc_xac_3: current.d3,
     Tong: sum,
     Ket_qua: ket_qua,
-    Du_doan: du_doan,
     id: "binhtool90",
   };
 });
@@ -226,7 +201,7 @@ fastify.get("/api/taixiu/history", async () => {
     session: i.sid,
     dice: [i.d1, i.d2, i.d3],
     total: i.d1 + i.d2 + i.d3,
-    result: i.result
+    result: getTX(i.d1, i.d2, i.d3) === "T" ? "Tài" : "Xỉu"
   })).map(JSON.stringify).join("\n");
 });
 
@@ -241,4 +216,3 @@ const start = async () => {
 };
 
 start();
-
