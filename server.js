@@ -1,238 +1,244 @@
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
+Const Fastify = require("fastify");
+const cors = require("@fastify/cors");
+const WebSocket = require("ws");
 const fs = require("fs");
+const path = require("path");
 
-const app = express();
-app.use(cors());
+const TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJ0cnVtbW1tbSIsImJvdCI6MCwiaXNNZXJjaGFudCI6ZmFsc2UsInZlcmlmaWVkQmFua0FjY291bnQiOmZhbHNlLCJwbGF5RXZlbnRMb2JieSI6ZmFsc2UsImN1c3RvbWVySWQiOjMxMTAzNTM4NCwiYWZmSWQiOiJHRU1XSU4iLCJiYW5uZWQiOmZhbHNlLCJicmFuZCI6ImdlbSIsInRpbWVzdGFtcCI6MTc1NTA2NDc3MjI4MywibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6ZmFsc2UsInBob25lVmVyaWZpZWQiOmZhbHNlLCJpcEFkZHJlc3MiOiIyMDAxOmVlMDo1MTQ4OmZlNDA6NTFjYjoxMmRiOjRlMTA6OTU0IiwibXV0ZSI6ZmFsc2UsImF2YXRhciI6Imh0dHBzOi8vaW1hZ2VzLnN3aW5zaG9wLm5ldC9pbWFnZXMvYXZhdGFyL2F2YXRhcl8xNi5wbmciLCJwbGF0Zm9ybUlkIjo1LCJ1c2VySWQiOiJlYzg5NDkyYy01NjI3LTRlY2ItODAyMi0wOWI1YWZjMzFlMGQiLCJyZWdUaW1lIjoxNzU0MjcwMDg0NTk4LCJwaG9uZSI6IiIsImRlcG9zaXQiOmZhbHNlLCJ1c2VybmFtZSI6IkdNX25ndXllbnZhbnRpbmgxMzMifQ.8LjlWnu-XOXsSqeZ5KyjndwMhrUXjcSqCoXv-gSPnUo";
 
-const PORT = process.env.PORT || 5000;
-const SELF_URL = process.env.SELF_URL || `http://localhost:${PORT}`;
-const HISTORY_FILE = "history.json";
+const fastify = Fastify({ logger: false });
+const PORT = process.env.PORT || 3001;
+const HISTORY_FILE = path.join(__dirname, 'taixiu_history.json');
 
-let patternHistory = [];
-let fullHistory = [];
-const MAX_HISTORY = 100;
+let rikResults = [];
+let rikCurrentSession = null;
+let rikWS = null;
+let rikIntervalCmd = null;
 
-let latestResult = {
-  id: "binhtool90",
-  Phien: 0,
-  Xuc_xac_1: 0,
-  Xuc_xac_2: 0,
-  Xuc_xac_3: 0,
-  Tong: 0,
-  Ket_qua: "",
-  Pattern: "",
-  Du_doan: "",
-  Do_tin_cay: "",
-  Giai_thich: "",
-  Streak: ""
-};
-
-// Load lịch sử từ file JSON nếu có
-if (fs.existsSync(HISTORY_FILE)) {
+function loadHistory() {
   try {
-    const data = JSON.parse(fs.readFileSync(HISTORY_FILE, "utf-8"));
-    fullHistory = data;
-    patternHistory = data.map(item => item.Ket_qua === "Tài" ? "t" : "x");
-    if (fullHistory.length > 0) latestResult = fullHistory[fullHistory.length - 1];
-    console.log(`✅ Đã load ${fullHistory.length} phiên từ history.json`);
-  } catch (e) {
-    console.error("❌ Lỗi khi đọc file history.json:", e.message);
+    if (fs.existsSync(HISTORY_FILE)) {
+      rikResults = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+      console.log(`📚 Loaded ${rikResults.length} history records`);
+    }
+  } catch (err) {
+    console.error('Error loading history:', err);
   }
 }
 
-function getTaiXiu(sum) {
-  return sum > 10 ? "t" : "x";
+function saveHistory() {
+  try {
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(rikResults), 'utf8');
+  } catch (err) {
+    console.error('Error saving history:', err);
+  }
 }
 
-// Thuật toán dự đoán nâng cao - kết hợp nhiều lớp phân tích
-function duDoanAdvanced(historyPattern, fullHistoryData) {
-  const votes = { t: 0, x: 0 };
-  const explanations = [];
-  const minHistory = 15;
-  
-  if (historyPattern.length < minHistory) {
-    // Quá ít dữ liệu, dự đoán dựa trên xác suất cơ bản
-    const counts = { t: 0, x: 0 };
-    for (const c of historyPattern) counts[c]++;
-    const total = counts.t + counts.x || 1;
-    const percentT = counts.t / total;
-    const duDoanResult = percentT >= 0.5 ? "Tài" : "Xỉu";
-    const doTinCay = (Math.max(counts.t, counts.x) / total * 100).toFixed(1);
-    return { duDoanResult, doTinCay, explanation: "Dữ liệu chưa đủ, dự đoán dựa trên xác suất tổng thể." };
-  }
-
-  // Lớp 1: Phân tích Markov bậc cao (Trọng số 50%)
-  const orders = [4, 3, 2];
-  const totalWeight = orders.reduce((sum, order) => sum + order, 0);
-
-  let markovVotes = { t: 0, x: 0 };
-  orders.forEach(order => {
-    const lastSeq = historyPattern.slice(-order);
-    let counts = { t: 0, x: 0 };
-    let total = 0;
-    for (let i = 0; i <= historyPattern.length - order - 1; i++) {
-      if (historyPattern.slice(i, i + order).join('') === lastSeq.join('')) {
-        const next = historyPattern[i + order];
-        counts[next]++;
-        total++;
+function decodeBinaryMessage(buffer) {
+  try {
+    const str = buffer.toString();
+    if (str.startsWith("[")) return JSON.parse(str);
+    let position = 0, result = [];
+    while (position < buffer.length) {
+      const type = buffer.readUInt8(position++);
+      if (type === 1) {
+        const len = buffer.readUInt16BE(position); position += 2;
+        result.push(buffer.toString('utf8', position, position + len));
+        position += len;
+      } else if (type === 2) {
+        result.push(buffer.readInt32BE(position)); position += 4;
+      } else if (type === 3 || type === 4) {
+        const len = buffer.readUInt16BE(position); position += 2;
+        result.push(JSON.parse(buffer.toString('utf8', position, position + len)));
+        position += len;
+      } else {
+        console.warn("Unknown binary type:", type); break;
       }
     }
-    if (total > 0) {
-      markovVotes.t += (counts.t / total) * order;
-      markovVotes.x += (counts.x / total) * order;
+    return result.length === 1 ? result[0] : result;
+  } catch (e) {
+    console.error("Binary decode error:", e);
+    return null;
+  }
+}
+
+function getTX(d1, d2, d3) {
+  return d1 + d2 + d3 >= 11 ? "T" : "X";
+}
+
+// ================== THUẬT TOÁN DỰ ĐOÁN ==================
+function predictNext(history) {
+    // Nếu không có đủ lịch sử (dưới 4 phiên), dự đoán dựa vào kết quả cuối cùng.
+    if (history.length < 4) {
+        const lastResult = history.at(-1)?.result;
+        return lastResult === "Tài" ? "Xỉu" : "Tài";
+    }
+
+    const recentResults = history.slice(0, 4).map(r => r.result);
+    const last = recentResults[0];
+
+    // Cầu 4-4 (ví dụ: T-T-T-T)
+    if (recentResults.every(k => k === last)) {
+        return last === "Tài" ? "Xỉu" : "Tài";
+    }
+
+    // Cầu 2-2 (ví dụ: T-T-X-X)
+    if (recentResults[0] === recentResults[1] &&
+        recentResults[2] === recentResults[3] &&
+        recentResults[0] !== recentResults[2]) {
+        return recentResults[0];
+    }
+
+    // Cầu 1-1 (ví dụ: T-X-T-X)
+    if (recentResults[0] !== recentResults[1] &&
+        recentResults[1] !== recentResults[2] &&
+        recentResults[2] !== recentResults[3] &&
+        recentResults[0] === recentResults[2]) {
+        return recentResults[0];
+    }
+
+    // Nếu không có mẫu rõ ràng, tìm kết quả phổ biến nhất trong 6 phiên gần nhất và dự đoán ngược lại
+    const last6 = history.slice(0, 6).map(r => r.result);
+    const taiCount = last6.filter(r => r === 'Tài').length;
+    const xiuCount = last6.filter(r => r === 'Xỉu').length;
+    
+    return taiCount > xiuCount ? "Xỉu" : "Tài";
+}
+
+// ================== PHẦN KẾT NỐI WEBSOCKET ==================
+
+function sendRikCmd1005() {
+  if (rikWS?.readyState === WebSocket.OPEN) {
+    rikWS.send(JSON.stringify([6, "MiniGame", "taixiuPlugin", { cmd: 1005 }]));
+  }
+}
+
+function connectRikWebSocket() {
+  console.log("🔌 Connecting to SunWin WebSocket...");
+  rikWS = new WebSocket(`wss://websocket.gmwin.io/websocket?token=${TOKEN}`);
+
+  rikWS.on("open", () => {
+    const authPayload = [
+      1,
+      "MiniGame",
+      "GM_nguyenvantinh133",
+      "tinhbip",
+      {
+        info: JSON.stringify({
+          ipAddress: "2001:ee0:5708:7700:8af3:abd1:fe2a:c62c",
+          wsToken: TOKEN,
+          userId: "d93d3d84-f069-4b3f-8dac-b4716a812143",
+          username: "GM_nguyenvantinh133",
+          timestamp: 1753443723662
+        }),
+        signature: "4C664474ADE343EA5FC7F6C23EDC57FCB5743536F05537D879B09B19B8C5143BD5D101587A1CDDC508E23117C8579AD95838D3AF6AC5324955F9277D78467130D1DF0A63AC2B1604DE56B3613638B3DB301A3C4B2F827B15515BB91435436BAC72413250EAE218804DEEF5207551819FE202855BD3727F6E89001D0783436DD8"
+      }
+    ];
+    rikWS.send(JSON.stringify(authPayload));
+
+    // Gửi ngay gói tin 1005
+    sendRikCmd1005();
+    clearInterval(rikIntervalCmd);
+    rikIntervalCmd = setInterval(sendRikCmd1005, 5000);
+  });
+
+  rikWS.on("message", (data) => {
+    try {
+      const json = typeof data === 'string' ? JSON.parse(data) : decodeBinaryMessage(data);
+      if (!json) return;
+
+      if (Array.isArray(json) && json[3]?.res?.d1) {
+        const res = json[3].res;
+        if (!rikCurrentSession || res.sid > rikCurrentSession) {
+          rikCurrentSession = res.sid;
+          rikResults.unshift({ 
+            sid: res.sid, 
+            d1: res.d1, 
+            d2: res.d2, 
+            d3: res.d3, 
+            result: getTX(res.d1, res.d2, res.d3) === "T" ? "Tài" : "Xỉu", 
+            timestamp: Date.now() 
+          });
+          if (rikResults.length > 100) rikResults.pop();
+          saveHistory();
+          console.log(`📥 Phiên mới ${res.sid} → ${rikResults[0].result}`);
+          setTimeout(() => { rikWS?.close(); connectRikWebSocket(); }, 1000);
+        }
+      } else if (Array.isArray(json) && json[1]?.htr) {
+        rikResults = json[1].htr.map(i => ({
+          sid: i.sid, 
+          d1: i.d1, 
+          d2: i.d2, 
+          d3: i.d3, 
+          result: getTX(i.d1, i.d2, i.d3) === "T" ? "Tài" : "Xỉu",
+          timestamp: Date.now()
+        })).sort((a, b) => b.sid - a.sid).slice(0, 100);
+        saveHistory();
+        console.log("📦 Đã tải lịch sử các phiên gần nhất.");
+      }
+    } catch (e) {
+      console.error("❌ Parse error:", e.message);
     }
   });
 
-  const markovTotal = markovVotes.t + markovVotes.x;
-  if (markovTotal > 0) {
-    votes.t += (markovVotes.t / markovTotal) * 0.5;
-    votes.x += (markovVotes.x / markovTotal) * 0.5;
-    explanations.push(`Markov: Phân tích mẫu hình bậc 2-4.`);
-  }
+  rikWS.on("close", () => {
+    console.log("🔌 WebSocket disconnected. Reconnecting...");
+    setTimeout(connectRikWebSocket, 5000);
+  });
 
-  // Lớp 2: Phân tích Xu hướng & Chuỗi (Trọng số 30%)
-  const last5 = historyPattern.slice(-5);
-  const taiStreak = last5.filter(r => r === 't').length;
-  const xiuStreak = last5.filter(r => r === 'x').length;
-
-  if (taiStreak >= 4) {
-    votes['x'] += 0.3;
-    explanations.push(`Xu hướng: Chuỗi ${taiStreak} Tài liên tiếp, khả năng đảo chiều cao.`);
-  } else if (xiuStreak >= 4) {
-    votes['t'] += 0.3;
-    explanations.push(`Xu hướng: Chuỗi ${xiuStreak} Xỉu liên tiếp, khả năng đảo chiều cao.`);
-  }
-
-  // Lớp 3: Phân tích Tổng điểm & Cân bằng (Trọng số 20%)
-  const lastTotal = fullHistoryData[fullHistoryData.length - 1]?.Tong;
-  if (lastTotal) {
-    // Nếu tổng điểm cực hiếm, dự đoán ngược lại
-    if (lastTotal <= 5) {
-      votes['t'] += 0.2;
-      explanations.push(`Tổng điểm: Tổng ${lastTotal} rất thấp, dự đoán Tài.`);
-    } else if (lastTotal >= 16) {
-      votes['x'] += 0.2;
-      explanations.push(`Tổng điểm: Tổng ${lastTotal} rất cao, dự đoán Xỉu.`);
-    }
-  }
-
-  // Tổng hợp và đưa ra quyết định cuối cùng
-  let duDoanResult = "Tài";
-  let doTinCay = "50.0";
-  let combinedVotes = votes.t + votes.x;
-
-  if (combinedVotes > 0) {
-    const percentT = (votes.t / combinedVotes) * 100;
-    const percentX = (votes.x / combinedVotes) * 100;
-    duDoanResult = percentT >= percentX ? "Tài" : "Xỉu";
-    doTinCay = percentT >= percentX ? percentT.toFixed(1) : percentX.toFixed(1);
-  }
-
-  return { duDoanResult, doTinCay, explanation: explanations.join(" | ") };
+  rikWS.on("error", (err) => {
+    console.error("🔌 WebSocket error:", err.message);
+    rikWS.close();
+  });
 }
 
-// Tính streak liên tiếp hiện tại
-function getCurrentStreak(pattern) {
-  if (pattern.length === 0) return { type: "-", count: 0 };
-  const lastChar = pattern.slice(-1);
-  let count = 0;
-  for (let i = pattern.length - 1; i >= 0; i--) {
-    if (pattern[i] === lastChar) count++;
-    else break;
-  }
+loadHistory();
+connectRikWebSocket();
+fastify.register(cors);
+
+// ================== PHẦN API ==================
+
+fastify.get("/api/ditmemaysun", async () => {
+  const valid = rikResults.filter(r => r.d1 && r.d2 && r.d3);
+  if (!valid.length) return { message: "Không có dữ liệu." };
+
+  const current = valid[0];
+  const sum = current.d1 + current.d2 + current.d3;
+  const ket_qua = sum >= 11 ? "Tài" : "Xỉu";
+  const du_doan = predictNext(valid);
+
   return {
-    type: lastChar === "t" ? "Tài" : "Xỉu",
-    count
+    Phien: current.sid,
+    Xuc_xac_1: current.d1,
+    Xuc_xac_2: current.d2,
+    Xuc_xac_3: current.d3,
+    Tong: sum,
+    Ket_qua: ket_qua,
+    Du_doan: du_doan,
+    id: "binhtool90",
   };
-}
+});
 
-function updateResult(d1, d2, d3, sid = null) {
-  const total = d1 + d2 + d3;
-  const result = total > 10 ? "Tài" : "Xỉu";
-  const shorthand = getTaiXiu(total);
+fastify.get("/api/taixiu/history", async () => {
+  const valid = rikResults.filter(r => r.d1 && r.d2 && r.d3);
+  if (!valid.length) return { message: "Không có dữ liệu lịch sử." };
+  return valid.map(i => ({
+    session: i.sid,
+    dice: [i.d1, i.d2, i.d3],
+    total: i.d1 + i.d2 + i.d3,
+    result: i.result
+  })).map(JSON.stringify).join("\n");
+});
 
-  if (sid !== latestResult.Phien) {
-    patternHistory.push(shorthand);
-    if (patternHistory.length > MAX_HISTORY) patternHistory.shift();
-
-    const pattern = patternHistory.join("");
-    const { duDoanResult, doTinCay, explanation } = duDoanAdvanced(patternHistory, fullHistory);
-    const streak = getCurrentStreak(pattern);
-
-    latestResult = {
-      id: "binhtool90",
-      Phien: sid || latestResult.Phien,
-      Xuc_xac_1: d1,
-      Xuc_xac_2: d2,
-      Xuc_xac_3: d3,
-      Tong: total,
-      Ket_qua: result,
-      Pattern: pattern,
-      Du_doan: duDoanResult,
-      Do_tin_cay: doTinCay + "%",
-      Giai_thich: explanation,
-      Streak: `${streak.type} (${streak.count})`
-    };
-
-    fullHistory.push({ ...latestResult });
-    if (fullHistory.length > MAX_HISTORY) fullHistory.shift();
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(fullHistory, null, 2));
-
-    const timeStr = new Date().toISOString().replace("T", " ").slice(0, 19);
-    console.log(
-      `[🎲✅] Phiên ${latestResult.Phien} - ${d1}-${d2}-${d3} ➜ Tổng: ${total}, Kết quả: ${result} | Dự đoán: ${duDoanResult} (${doTinCay}%) | Gợi ý: ${explanation}`
-    );
-  }
-}
-
-// API lấy kết quả Hitclub
-const API_TARGET_URL = 'https://jakpotgwab.geightdors.net/glms/v1/notify/taixiu?platform_id=b5&gid=vgmn_101';
-
-async function fetchGameData() {
+const start = async () => {
   try {
-    const response = await axios.get(API_TARGET_URL);
-    const data = response.data;
-    if (data.status === "OK" && Array.isArray(data.data) && data.data.length > 0) {
-      const game = data.data[0];
-      const sid = game.sid;
-      const d1 = game.d1;
-      const d2 = game.d2;
-      const d3 = game.d3;
-      if (sid && d1 !== undefined && d2 !== undefined && d3 !== undefined) {
-        updateResult(d1, d2, d3, sid);
-      }
-    }
-  } catch (error) {
-    console.error("❌ Lỗi khi lấy dữ liệu từ API GET:", error.message);
+    const address = await fastify.listen({ port: PORT, host: "0.0.0.0" });
+    console.log(`🚀 API chạy tại ${address}`);
+  } catch (err) {
+    console.error("❌ Server error:", err);
+    process.exit(1);
   }
-}
+};
 
-// Fetch dữ liệu mỗi 5s
-setInterval(fetchGameData, 5000);
-
-// API endpoints
-app.get("/api/taixiu", (req, res) => {
-  res.json(latestResult);
-});
-
-app.get("/api/history", (req, res) => {
-  res.json(fullHistory);
-});
-
-app.get("/", (req, res) => {
-  res.json({ status: "HITCLUB Tài Xỉu đang chạy", phien: latestResult.Phien });
-});
-
-// Ping để Render không ngủ
-setInterval(() => {
-  if (SELF_URL.includes("http")) {
-    axios.get(`${SELF_URL}/api/taixiu`).catch(() => {});
-  }
-}, 300000);
-
-app.listen(PORT, () => {
-  console.log(`🚀 Server b52 Tài Xỉu đang chạy tại http://localhost:${PORT}`);
-});
+start();
 
